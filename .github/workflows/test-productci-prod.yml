@@ -1,0 +1,99 @@
+name: Product API CI Production
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-production:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Build and start Docker Compose
+        run: docker compose up -d --build
+
+      - name: Wait for services to become healthy
+        run: |
+          echo "Waiting for containers..."
+
+          for i in {1..30}; do
+            MONGO_STATUS=$(docker inspect --format='{{.State.Health.Status}}' nammongodb 2>/dev/null || echo "starting")
+            API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' product-api 2>/dev/null || echo "starting")
+
+            echo "MongoDB: $MONGO_STATUS"
+            echo "Product API: $API_STATUS"
+
+            if [ "$MONGO_STATUS" = "healthy" ] && [ "$API_STATUS" = "healthy" ]; then
+              echo "All services are healthy"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Services failed to become healthy"
+          docker compose ps
+          docker logs product-api
+          exit 1
+
+      - name: Show running containers
+        run: docker compose ps
+
+      - name: Test Health API
+        run: |
+          curl -f http://localhost:3000/health
+
+      - name: Test CREATE Product
+        run: |
+          curl -f -X POST http://localhost:3000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{
+              "pid": "CI001",
+              "pname": "CI Product",
+              "price": 100000,
+              "quantity": 10
+            }'
+
+      - name: Test READ Products
+        run: |
+          curl -f http://localhost:3000/api/products
+
+      - name: Test READ Product CI001
+        run: |
+          curl -f http://localhost:3000/api/products/CI001
+
+      - name: Test UPDATE Product
+        run: |
+          curl -f -X PUT http://localhost:3000/api/products/CI001 \
+            -H "Content-Type: application/json" \
+            -d '{
+              "pname": "Updated CI Product",
+              "price": 200000,
+              "quantity": 20
+            }'
+
+      - name: Check MongoDB Data
+        run: |
+          docker exec nammongodb mongosh productdb \
+            --quiet \
+            --eval "db.products.find({pid:'CI001'}).pretty()"
+
+      - name: Test DELETE Product
+        run: |
+          curl -f -X DELETE http://localhost:3000/api/products/CI001
+
+      - name: Show Product API Logs
+        if: always()
+        run: docker logs product-api
+
+      - name: Stop Docker Compose
+        if: always()
+        run: docker compose down
